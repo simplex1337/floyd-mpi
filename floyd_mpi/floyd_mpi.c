@@ -13,7 +13,7 @@ double wtime()
     return (double) t.tv_sec + (double) t.tv_usec * 1E-6;
 }
 
-void min(int a, int b)
+int min(int a, int b)
 {
     return (a < b) ? a : b;
 }
@@ -86,13 +86,21 @@ void write_matrix(const char *fname, int n, int *a)
     fclose(fp);
 }
 
-// функция для рассылки строки всем процессам
-void raw_distribution(*proc_raws, int n, int raw_num, int k, int *p_raw)
+void copy(int *p_beg, int *p_end, int *rows)
 {
-    int proc_raw_rank; //ранг процесса, которому принадлежит k-я строка
+    int *p = p_beg;
+    for (int i = 0; p < p_end; i++, p++)
+        rows[i] = *p;
+}
+
+// функция для рассылки строки всем процессам
+void raw_distribution(int *proc_raws, int n, int raw_num, int k, int *raw, int commsize, int rank)
+{
+    int proc_raw_rank = 228; //ранг процесса, которому принадлежит k-я строка
     int proc_raw_num; //номер k-й строки в полосе матрицы
 
     //нахождение ранга процесса - владельца k-й строки
+    /*
     int rest_raws = n;
     int ind = 0;
     int num = n / commsize;
@@ -103,25 +111,33 @@ void raw_distribution(*proc_raws, int n, int raw_num, int k, int *p_raw)
         ind += num;
         num = rest_raws / (commsize - proc_raw_rank);
     }
-    proc_raw_rank = proc_raw_rank - 1;
-    proc_raw_num = k - ind;
+    */
+    int lb, ub;
+    for (int i = 0; i < commsize; i++) {
+        get_chunk(0, n - 1, commsize, i, &lb, &ub);
+        if (k >= lb && k <= ub) {
+            proc_raw_rank = i;
+            break;
+        }
+    }
 
     //копирование строки  в массив raw
-    if (proc_raw_rank == rank)
-        copy(&proc_raws[proc_raw_num * n], &proc_raws[(proc_raw_num + 1) * n], raw)
+    if (proc_raw_rank == rank) {
+        int need_row = k - lb;
+        copy(&proc_raws[need_row * n], &proc_raws[(need_row + 1) * n], raw);
+    }
     //распределение k-й строки между процессами
     MPI_Bcast(raw, n, MPI_INT, proc_raw_rank, MPI_COMM_WORLD);
-
 }
 
-void floyd_mpi(int *proc_raws, int n, int raw_num)
+void floyd_mpi(int *proc_raws, int n, int raw_num, int commsize, int rank)
 {
-    int *raw = (int *) calloc(n, sizeof(int));
+    int *raw = (int *) malloc(sizeof(*raw) * n);
     int t1, t2;
 
     for (int k = 0; k < n; k++) {
         //распределение k-й строки среди процессов
-        raw_distribution(proc_raws, n, raw_num, k, raw)
+        raw_distribution(proc_raws, n, raw_num, k, raw, commsize, rank);
         // обновление  элементов матрицы смежности
         for (int i = 0; i < raw_num; i++) {
             for (int j = 0; j < n; j++) {
@@ -137,12 +153,12 @@ void floyd_mpi(int *proc_raws, int n, int raw_num)
 }
 
 //распределение данных между процессами
-void data_distribution(int *g, *proc_raws, int n, int raw_num)
+void data_distribution(int *g, int *proc_raws, int n, int raw_num)
 {
 
 }
 
-void result_collection(int *g, int proc_raws, int raw_num)
+void result_collection(int *g, int *proc_raws, int raw_num)
 {
 
 }
@@ -159,41 +175,80 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
     int *g = gen_graph(n); //инициализация
-    if (genname)
-        write_matrix(genname, n, g);
     int rank, commsize;
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &commsize);
+
+    //if (genname && !rank)
+        //write_matrix(genname, n, g);
+
+    MPI_Bcast(g, n * n, MPI_INT, 0, MPI_COMM_WORLD);
+
+    /*if (rank == 0) {
+        for (int i = 0; i < n; i++) {
+            for(int j = 0; j < n; j++)
+                printf("%d ", g[i * n + j]);
+            printf("\n");
+        }
+    }*/
+
     int lb, ub;
-    get_chunk(0, m - 1, commsize, rank, &lb, &ub);
+    get_chunk(0, n - 1, commsize, rank, &lb, &ub);
     int raw_num = ub - lb + 1; //чисто строк для текущего процесса
     //строки матрицы смежности текущего процесса
     int *proc_raws = malloc(sizeof(*proc_raws) * raw_num * n);
-    for (int i = lb; i < raw_num; i++) {
+    for (int i = 0; i < raw_num; i++)
         for (int j = 0; j < n; j++)
-            proc_raws[i * n + j] = (g[i * n + j] == 0) ? 10000 : g[i * n + j];
-        }
+            proc_raws[i * n + j] = (g[(i + lb) * n + j] == 0) ? 10000 : g[(i + lb) * n + j];
+
     // int *gp = (int *) calloc(n * n, sizeof(int));
     // memcpy(gp, g, n * n * sizeof(int)); //матрица хранится в каждом процессе
     // infinitize(n, proc_raws);
 
-    //my code here(data_distribution(+?), floyd_mpi(+),result_collection)
 
-    floyd_mpi(proc_raws, n, raw_num);
+    floyd_mpi(proc_raws, n, raw_num, commsize, rank);
 
-    for (int i = 0; i < n * n; i += n + 1)
-        gp[i] = 0;
     // deinfinitize(n, proc_raws);
 
-    // printf("n:     %d\n", n);
-    // printf("Time parallel (sec): %.6f\nS(n): %.6f\n", tp);
+    if (!rank) {
+        for (int i = 0; i < n * n; i++)
+            g[i] = 0;
+        int *recvcnt = malloc(sizeof(*recvcnt) * commsize);
+        int *displs = malloc(sizeof(*displs) * commsize);
+        for (int i = 0; i < commsize; i++) {
+            int lb, ub;
+            get_chunk(0, n - 1, commsize, i, &lb, &ub);
+            recvcnt[i] = (ub - lb + 1) * n;
+            displs[i] = (i > 0) ? displs[i - 1] + recvcnt[i - 1] : 0;
+            //printf("cnt = %d, displc = %d\n", recvcnt[i], displs[i]);
+        }
+        MPI_Gatherv(proc_raws, raw_num * n, MPI_INT, g, recvcnt, displs, MPI_INT, 0, MPI_COMM_WORLD);
 
-    if (parname)
-        write_matrix(parname, n, gp);
-
+    } else
+        MPI_Gatherv(proc_raws, raw_num * n, MPI_INT, NULL, NULL, NULL, MPI_INT, 0, MPI_COMM_WORLD);
+    for (int i = 0; i < n * n; i += n + 1)
+       g[i] = 0;
+    t = wtime() - t;
+    double tmax;
+    MPI_Reduce(&t, &tmax, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    if (!rank) {
+        printf("n:     %d\n", n);
+        printf("Time for %d proc: %.6f\n", commsize, tmax);
+    }
+    /*if (rank == 0) {
+        printf("----\n");
+        for (int i = 0; i < n; i++) {
+            for(int j = 0; j < n; j++)
+                printf("%d ", g[i * n + j]);
+            printf("\n");
+        }
+    }
+    //if (parname)
+      //  write_matrix(parname, n, gp);
+    */
     free(g);
-    free(gp);
+    free(proc_raws);
     MPI_Finalize();
     return 0;
 }
